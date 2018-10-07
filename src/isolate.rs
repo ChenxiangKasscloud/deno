@@ -44,12 +44,7 @@ pub struct Isolate {
   ptr: *const libdeno::isolate,
   dispatch: Dispatch,
   rx: mpsc::Receiver<(i32, Buf)>,
-  // Although Isolate is only accessed on the main thread, we use an atomic
-  // variable here to workaround an issue probably caused by our poor usage
-  // of Box::leak in Isolate::from_c()
-  // https://github.com/denoland/deno/issues/919
-  // ntasks ought to be i32.
-  ntasks: atomic::AtomicIsize,
+  ntasks: i32,
   pub timeout_due: Option<Instant>,
   pub state: Arc<IsolateState>,
 }
@@ -91,7 +86,7 @@ impl Isolate {
       ptr: 0 as *const libdeno::isolate,
       dispatch,
       rx,
-      ntasks: atomic::AtomicIsize::new(0),
+      ntasks: 0,
       timeout_due: None,
       state: Arc::new(IsolateState {
         dir: deno_dir::DenoDir::new(flags.reload, None).unwrap(),
@@ -194,18 +189,25 @@ impl Isolate {
   }
 
   fn ntasks_increment(&mut self) {
-    let previous_ntasks = self.ntasks.fetch_add(1, atomic::Ordering::SeqCst);
-    assert!(previous_ntasks >= 0);
+    assert!(self.ntasks >= 0);
+    self.ntasks = self.ntasks + 1;
   }
 
   fn ntasks_decrement(&mut self) {
-    let previous_ntasks = self.ntasks.fetch_sub(1, atomic::Ordering::SeqCst);
-    assert!(previous_ntasks >= 1);
+    // Do something that has no effect. This is done to work around a spooky
+    // bug that happens in release mode only (presumably a compiler bug), that
+    // causes nsize to unexpectedly contain zero.
+    // TODO: remove this workaround when no longer necessary.
+    #[allow(unused)]
+    static UNUSED: atomic::AtomicIsize = atomic::AtomicIsize::new(0);
+    UNUSED.fetch_add(self.ntasks as isize, atomic::Ordering::AcqRel);
+    // Actually decrement the tasks counter here.
+    self.ntasks = self.ntasks - 1;
+    assert!(self.ntasks >= 0);
   }
 
   fn is_idle(&self) -> bool {
-    let n = self.ntasks.load(atomic::Ordering::SeqCst);
-    n == 0 && self.timeout_due.is_none()
+    self.ntasks == 0 && self.timeout_due.is_none()
   }
 }
 
